@@ -74,7 +74,7 @@ class Client(private val host: String, private val port: Int) {
             val promise = CompletableFuture<Unit>()
             pendingSubscribeRequests[topic] = promise
             writeUtilityMessage(SUBSCRIBE_REQUEST, it, topic, 0L)
-            logger.info("Subscription request for topic '$topic' sent")
+            logger.info("Sent subscription request for topic '$topic'")
             return promise
         } ?: throw IllegalArgumentException("Client stopped")
     }
@@ -85,7 +85,6 @@ class Client(private val host: String, private val port: Int) {
      * acknowledge this signal, meaning that they have consumed all
      * messages sent by this client before
      */
-    @OptIn(ExperimentalStdlibApi::class)
     fun sync(topic: String): Future<Unit> {
         logger.info("Sending sync request for topic '$topic'")
         socket?.outputStream?.let {
@@ -93,7 +92,7 @@ class Client(private val host: String, private val port: Int) {
             val promise = CompletableFuture<Unit>()
             pendingSyncRequests[id] = promise
             writeUtilityMessage(SYNC_REQUEST, it, topic, id)
-            logger.info("Sync request for topic '$topic', id=${id.toHexString()} sent")
+            logger.info("Sent sync request for topic '$topic'")
             return promise
         } ?: throw IllegalArgumentException("Client stopped")
     }
