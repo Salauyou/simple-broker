@@ -1,6 +1,5 @@
-package de.salauyou.de.salauyou.simplebroker
+package de.salauyou.simplebroker
 
-import de.salauyou.simplebroker.Message
 import org.slf4j.LoggerFactory
 import java.io.InputStream
 import java.io.OutputStream
@@ -12,24 +11,25 @@ import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
-import java.util.concurrent.LinkedBlockingQueue
 
 class Server(private val port: Int) {
 
     @Volatile private var serverSocket: ServerSocket? = null
-    private val socketListeningExecutor = Executors.newSingleThreadExecutor()
+    private val clientConnectionListeningExecutor = Executors.newSingleThreadExecutor()
     private val clientConnectionThreadFactory = Executors.defaultThreadFactory()
-    private val clientConnections = LinkedBlockingQueue<ClientConnection>()
+    private val clientConnections = ConcurrentLinkedQueue<ClientConnection>()
     private val topicSubscriptions = ConcurrentHashMap<String, Queue<ClientConnection>>()
     private val pendingSyncRequests = ConcurrentHashMap<Long, Pair<ClientConnection, Queue<ClientConnection>>>()
 
     @Synchronized
     fun start() {
-        logger.info("Starting the server")
-        serverSocket = ServerSocket(port)
-        socketListeningExecutor.submit {
-            listenClientConnections()
+        logger.info("Starting the server at port $port")
+        serverSocket = ServerSocket(port).also {
+            clientConnectionListeningExecutor.submit {
+                listenClientConnections(it)
+            }
         }
         logger.info("Started the server")
     }
@@ -47,20 +47,19 @@ class Server(private val port: Int) {
         }
     }
 
-    private fun listenClientConnections() {
+    private fun listenClientConnections(serverSocket: ServerSocket) {
         while (true) {
-            serverSocket?.let {
-                if (it.isClosed) {
-                    return
-                }
-                val socket = it.accept()
-                val connection = ClientConnection(socket)
-                clientConnections.add(connection)
-                logger.info("Remote client connected to server: ${connection.remoteAddress}")
-                clientConnectionThreadFactory.newThread {
-                    connection.run()
-                }.start()
-            } ?: return
+            if (serverSocket.isClosed) {
+                logger.info("Server socket closed")
+                return
+            }
+            val socket = serverSocket.accept()
+            val connection = ClientConnection(socket)
+            clientConnections.add(connection)
+            logger.info("Remote client connected to server: ${connection.remoteAddress}")
+            clientConnectionThreadFactory.newThread {
+                connection.run()
+            }.start()
         }
     }
 
@@ -78,25 +77,29 @@ class Server(private val port: Int) {
                 when (val mark = readMark(input)) {
                     CLOSED -> {
                         logger.info("Remote client $remoteAddress closed connection")
+                        close()
                         return
                     }
                     MESSAGE -> {
                         val message = readMessage(input)
                         val topic = message.getTopic()
                         logger.info("Received message from $remoteAddress to topic '$topic' (${message.getBody().size} bytes)")
-                        topicSubscriptions[topic]?.let { clients ->
-                            logger.info("Sending message to subscribed clients")
+                        val clients = topicSubscriptions[topic].orEmpty()
+                        if (clients.isEmpty()) {
+                            logger.info("No clients subscribed to topic '$topic', message dropped")
+                        } else {
+                            logger.info("Sending message to subscribed clients (${clients.size})")
                             clients.forEach {
                                 writeMessage(it.output, message)
+                                logger.info("Message sent to remote client ${it.remoteAddress}")
                             }
-                            logger.info("Message sent to subscribed clients")
-                        } ?: logger.info("No clients subscribed to topic '$topic', message dropped")
+                        }
                     }
                     SUBSCRIBE_REQUEST -> {
                         val request = readUtilityMessage(input)
                         logger.info("Received subscription request from $remoteAddress for topic '${request.topic}'")
                         topicSubscriptions.computeIfAbsent(request.topic) {
-                            LinkedBlockingQueue()
+                            ConcurrentLinkedQueue()
                         }.add(this)
                         writeUtilityMessage(SUBSCRIBE_ACK, output, request.topic, 0L)
                         logger.info("Subscribed remote client $remoteAddress to topic '${request.topic}'")
@@ -107,11 +110,11 @@ class Server(private val port: Int) {
                         val subscribedClients = topicSubscriptions[request.topic].orEmpty()
                         if (subscribedClients.isEmpty()) {
                             writeUtilityMessage(SYNC_RESPONSE, output, request.topic, request.id)
-                            logger.info("No clients subscribed to topic ${request.topic}, sync response sent to remote client ${this.remoteAddress}")
+                            logger.info("No clients subscribed to topic ${request.topic}, sync response sent to remote client $remoteAddress")
                         } else {
                             subscribedClients.forEach {
                                 pendingSyncRequests.computeIfAbsent(request.id) {
-                                    this to LinkedBlockingQueue()
+                                    this to ConcurrentLinkedQueue()
                                 }.second.add(it)
                                 writeUtilityMessage(SYNC_REQUEST, it.output, request.topic, request.id)
                                 logger.info("Sync request for $request sent to remote client ${it.remoteAddress}")

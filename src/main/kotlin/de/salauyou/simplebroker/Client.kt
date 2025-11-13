@@ -1,20 +1,18 @@
-package de.salauyou.de.salauyou.simplebroker
+package de.salauyou.simplebroker
 
-import de.salauyou.de.salauyou.simplebroker.Server.Companion.CLOSED
-import de.salauyou.de.salauyou.simplebroker.Server.Companion.MESSAGE
-import de.salauyou.de.salauyou.simplebroker.Server.Companion.SUBSCRIBE_ACK
-import de.salauyou.de.salauyou.simplebroker.Server.Companion.SUBSCRIBE_REQUEST
-import de.salauyou.de.salauyou.simplebroker.Server.Companion.SYNC_ACK
-import de.salauyou.de.salauyou.simplebroker.Server.Companion.SYNC_REQUEST
-import de.salauyou.de.salauyou.simplebroker.Server.Companion.SYNC_RESPONSE
-import de.salauyou.de.salauyou.simplebroker.Server.Companion.readMark
-import de.salauyou.de.salauyou.simplebroker.Server.Companion.readMessage
-import de.salauyou.de.salauyou.simplebroker.Server.Companion.readUtilityMessage
-import de.salauyou.de.salauyou.simplebroker.Server.Companion.writeMessage
-import de.salauyou.de.salauyou.simplebroker.Server.Companion.writeUtilityMessage
-import de.salauyou.simplebroker.Message
+import de.salauyou.simplebroker.Server.Companion.CLOSED
+import de.salauyou.simplebroker.Server.Companion.MESSAGE
+import de.salauyou.simplebroker.Server.Companion.SUBSCRIBE_ACK
+import de.salauyou.simplebroker.Server.Companion.SUBSCRIBE_REQUEST
+import de.salauyou.simplebroker.Server.Companion.SYNC_ACK
+import de.salauyou.simplebroker.Server.Companion.SYNC_REQUEST
+import de.salauyou.simplebroker.Server.Companion.SYNC_RESPONSE
+import de.salauyou.simplebroker.Server.Companion.readMark
+import de.salauyou.simplebroker.Server.Companion.readMessage
+import de.salauyou.simplebroker.Server.Companion.readUtilityMessage
+import de.salauyou.simplebroker.Server.Companion.writeMessage
+import de.salauyou.simplebroker.Server.Companion.writeUtilityMessage
 import org.slf4j.LoggerFactory
-import java.io.InputStream
 import java.net.Socket
 import java.util.*
 import java.util.concurrent.CompletableFuture
@@ -32,15 +30,14 @@ class Client(private val host: String, private val port: Int) {
 
     @Synchronized
     fun start() {
-        logger.info("Starting the client")
+        logger.info("Connecting the client to $host:$port")
         socket = Socket(host, port).also {
             it.keepAlive = true
             receiverExecutor.submit {
-                runServerConnection(it.getInputStream())
+                runServerConnection(it)
             }
-
         }
-        logger.info("Started the client")
+        logger.info("Connected the client")
     }
 
     @Synchronized
@@ -97,9 +94,10 @@ class Client(private val host: String, private val port: Int) {
         } ?: throw IllegalArgumentException("Client stopped")
     }
 
-    private fun runServerConnection(inputStream: InputStream) {
+    private fun runServerConnection(socket: Socket) {
+        val inputStream = socket.getInputStream()
         while (true) {
-            if (socket?.isClosed != false) {
+            if (socket.isClosed) {
                 return
             }
             when (val mark = readMark(inputStream)) {
@@ -120,7 +118,7 @@ class Client(private val host: String, private val port: Int) {
                 SYNC_REQUEST -> {
                     val request = readUtilityMessage(inputStream)
                     logger.info("Received sync request for $request")
-                    socket?.outputStream?.let {
+                    socket.outputStream?.let {
                         writeUtilityMessage(SYNC_ACK, it, request.topic, request.id)
                         logger.info("Acked sync request $request")
                     } ?: logger.info("Unable to ack: socket is closed")
