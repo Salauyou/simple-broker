@@ -1,18 +1,21 @@
 package de.salauyou.simplebroker
 
-import de.salauyou.de.salauyou.simplebroker.Client
-import de.salauyou.de.salauyou.simplebroker.Server
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
 import java.util.concurrent.LinkedBlockingQueue
+import kotlin.random.Random
 
 class TestClientToServer {
 
+    private val port = 7900 + Random.Default.nextInt(100)
+    private val host = "localhost"
+    private val topic = "Test topic"
+    
     @Test
     fun `server starts, then client connects, then closes`() {
-        val server = Server(7000)
+        val server = Server(port)
         server.start()
-        val client = Client("localhost", 7000)
+        val client = Client(host, port)
         client.start()
         client.stop()
         server.stop()
@@ -20,21 +23,20 @@ class TestClientToServer {
 
     @Test
     fun `client requests sync for topic with no subscribers`() {
-        val server = Server(7000)
+        val server = Server(port)
         server.start()
-        val client = Client("localhost", 7000)
+        val client = Client(host, port)
         client.start()
-        client.sync("Test topic").get()
+        client.sync(topic).get()
         client.stop()
         server.stop()
     }
 
     @Test
     fun `client requests sync for topic with self subscription`() {
-        val topic = "Test topic"
-        val server = Server(7000)
+        val server = Server(port)
         server.start()
-        val client = Client("localhost", 7000)
+        val client = Client(host, port)
         client.start()
         client.subscribeTopic(topic, {}).get() // wait acknowledgement
         client.sync(topic).get()
@@ -44,12 +46,11 @@ class TestClientToServer {
 
     @Test
     fun `client requests sync for topic with subscriber`() {
-        val topic = "Test topic"
-        val server = Server(7000)
+        val server = Server(port)
         server.start()
-        val client1 = Client("localhost", 7000)
+        val client1 = Client(host, port)
         client1.start()
-        val client2 = Client("localhost", 7000)
+        val client2 = Client(host, port)
         client2.start()
         client2.subscribeTopic(topic, {}).get()
         client1.sync(topic).get()
@@ -65,11 +66,11 @@ class TestClientToServer {
 
         val topic1 = "Topic 1"
         val topic2 = "Topic 2"
-        val server = Server(7000)
+        val server = Server(port)
         server.start()
 
-        val client1 = Client("localhost", 7000)
-        val client2 = Client("localhost", 7000)
+        val client1 = Client(host, port)
+        val client2 = Client(host, port)
         client1.start()
         client2.start()
 
@@ -97,6 +98,14 @@ class TestClientToServer {
         assertEquals(q2.toList(), q1.toList())
 
         client1.stop()
+
+        // when client1 is stopped, it will not accept anything more
+        q2.forEach {
+            client2.sendToTopic(topic1, it.toByteArray())
+        }
+        client2.sync(topic1).get()
+        assertEquals(q2.toList(), q1.toList())
+
         client2.stop()
         server.stop()
     }
