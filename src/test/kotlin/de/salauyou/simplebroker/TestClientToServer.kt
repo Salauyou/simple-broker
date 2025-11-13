@@ -4,6 +4,7 @@ import de.salauyou.de.salauyou.simplebroker.Client
 import de.salauyou.de.salauyou.simplebroker.Server
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
+import java.util.concurrent.LinkedBlockingQueue
 
 class TestClientToServer {
 
@@ -13,7 +14,6 @@ class TestClientToServer {
         server.start()
         val client = Client("localhost", 7000)
         client.start()
-        client.subscribeTopic("Test topic", {}).get()
         client.stop()
         server.stop()
     }
@@ -25,6 +25,19 @@ class TestClientToServer {
         val client = Client("localhost", 7000)
         client.start()
         client.sync("Test topic").get()
+        client.stop()
+        server.stop()
+    }
+
+    @Test
+    fun `client requests sync for topic with self subscription`() {
+        val topic = "Test topic"
+        val server = Server(7000)
+        server.start()
+        val client = Client("localhost", 7000)
+        client.start()
+        client.subscribeTopic(topic, {}).get() // wait acknowledgement
+        client.sync(topic).get()
         client.stop()
         server.stop()
     }
@@ -47,8 +60,8 @@ class TestClientToServer {
 
     @Test
     fun `clients sent messages to each other`() {
-        val q1 = mutableListOf("A", "B", "C")
-        val q2 = mutableListOf<String>()
+        val q1 = LinkedBlockingQueue(listOf("A", "B", "C", "D"))
+        val q2 = LinkedBlockingQueue<String>()
 
         val topic1 = "Topic 1"
         val topic2 = "Topic 2"
@@ -57,33 +70,31 @@ class TestClientToServer {
 
         val client1 = Client("localhost", 7000)
         val client2 = Client("localhost", 7000)
-
         client1.start()
-        client1.subscribeTopic(topic1) { message ->
-            Thread.sleep(100)  // slow consumption
-            q1.add(String(message.getBody()))
-        }.get()
-
         client2.start()
+
+        // transfer from q1 to q2 via topic 2
         client2.subscribeTopic(topic2) { message ->
-            Thread.sleep(100)
             q2.add(String(message.getBody()))
         }.get()
-
-        // transfer from q1 to q2 via topic
         q1.forEach {
             client1.sendToTopic(topic2, it.toByteArray())
+            Thread.sleep(100)  // slow production
         }
         client1.sync(topic2).get()  // wait until all sent messages consumed
-        assertEquals(q1, q2)
+        assertEquals(q1.toList(), q2.toList())
 
-        // transfer back from q2 to q1
+        // transfer back from q2 to q1 via topic 1
         q1.clear()
+        client1.subscribeTopic(topic1) { message ->
+            q1.add(String(message.getBody()))
+            Thread.sleep(100)  // slow consumption
+        }.get()
         q2.forEach {
             client2.sendToTopic(topic1, it.toByteArray())
         }
         client2.sync(topic1).get()
-        assertEquals(q2, q1)
+        assertEquals(q2.toList(), q1.toList())
 
         client1.stop()
         client2.stop()
