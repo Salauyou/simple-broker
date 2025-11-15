@@ -18,11 +18,11 @@ class TestsWithRunningServer {
         try {
             client1.start()
             client2.start()
-            client2.subscribeTopic(topic) {
+            client2.subscribe(topic) {
                 reference.set(String(it.getBody()))
             }.get()
 
-            client1.sendToTopic(topic, testData.toByteArray())
+            client1.send(topic, testData.toByteArray())
             client1.sync(topic).get()
 
             assertEquals(testData, reference.get())

@@ -38,7 +38,7 @@ class TestClientToServer {
         server.start()
         val client = Client(host, port)
         client.start()
-        client.subscribeTopic(topic, {}).get() // wait acknowledgement
+        client.subscribe(topic, {}).get() // wait acknowledgement
         client.sync(topic).get()
         client.stop()
         server.stop()
@@ -52,7 +52,7 @@ class TestClientToServer {
         client1.start()
         val client2 = Client(host, port)
         client2.start()
-        client2.subscribeTopic(topic, {}).get()
+        client2.subscribe(topic, {}).get()
         client1.sync(topic).get()
         client1.stop()
         client2.stop()
@@ -75,11 +75,11 @@ class TestClientToServer {
         client2.start()
 
         // transfer from q1 to q2 via topic 2
-        client2.subscribeTopic(topic2) { message ->
+        client2.subscribe(topic2) { message ->
             q2.add(String(message.getBody()))
         }.get()
         q1.forEach {
-            client1.sendToTopic(topic2, it.toByteArray())
+            client1.send(topic2, it.toByteArray())
             Thread.sleep(100)  // slow production
         }
         client1.sync(topic2).get()  // wait until all sent messages consumed
@@ -87,12 +87,12 @@ class TestClientToServer {
 
         // transfer back from q2 to q1 via topic 1
         q1.clear()
-        client1.subscribeTopic(topic1) { message ->
+        client1.subscribe(topic1) { message ->
             q1.add(String(message.getBody()))
             Thread.sleep(100)  // slow consumption
         }.get()
         q2.forEach {
-            client2.sendToTopic(topic1, it.toByteArray())
+            client2.send(topic1, it.toByteArray())
         }
         client2.sync(topic1).get()
         assertEquals(q2.toList(), q1.toList())
@@ -101,7 +101,7 @@ class TestClientToServer {
 
         // when client1 is stopped, it will not accept anything more
         q2.forEach {
-            client2.sendToTopic(topic1, it.toByteArray())
+            client2.send(topic1, it.toByteArray())
         }
         client2.sync(topic1).get()
         assertEquals(q2.toList(), q1.toList())
