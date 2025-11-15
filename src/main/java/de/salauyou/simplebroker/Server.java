@@ -20,7 +20,7 @@ import static de.salauyou.simplebroker.SocketConnection.singleThreadExecutor;
 
 public class Server {
 
-  private static final Logger logger = LoggerFactory.getLogger(Server.class);
+  private static final Logger logger = LoggerFactory.getLogger("server");
 
   private final int port;
   private final Executor clientConnectionListeningExecutor = singleThreadExecutor("server");
@@ -83,9 +83,6 @@ public class Server {
           try {
             connection.run();
           } catch (Exception e) {
-            if (e instanceof SocketConnection.IOExceptionWrapper wrapper) {
-              e = wrapper.cause;
-            }
             logger.error("Closing connection " + connection.clientId + " due to exception", e);
           } finally {
             connection.close();
@@ -107,6 +104,7 @@ public class Server {
     private final ExecutorService replyExecutor = singleThreadExecutor("client-" + seq + "-out");
     private final SocketAddress remoteAddress;
     private String clientId;
+    private volatile Exception replyException = null;
 
     private ClientConnection(Socket socket) throws IOException {
       super(socket);
@@ -114,17 +112,15 @@ public class Server {
       this.clientId = remoteAddress.toString();
     }
 
-    void run() throws IOException {
+    void run() throws Exception {
       while (true) {
-        if (isClosed()) {
-          logger.info("Connection with {} is closed", clientId);
-          return;
+        if (replyException != null) {
+          throw replyException;  // break the reading loop and propagate
         }
         var mark = readMark();
         switch (mark) {
           case CLOSED -> {
             logger.info("Client {} closed connection", clientId);
-            close();
             return;
           }
           case CLIENT_ID -> {
@@ -140,8 +136,9 @@ public class Server {
               try {
                 writeUtilityMessage(SUBSCRIBE_ACK, request.topic(), 0);
                 logger.info("Sent subscription ack for topic={} client={}", request.topic(), clientId);
-              } catch (IOException e) {
-                throw new IOExceptionWrapper(e);
+              } catch (Exception e) {
+                logger.warn("Could not send subscription ack for topic={} client={}", request.topic(), clientId);
+                breakWithException(e);
               }
             });
           }
@@ -159,8 +156,9 @@ public class Server {
                   try {
                     it.writeMessage(message);
                     logger.info("Sent message to {}", it.clientId);
-                  } catch (IOException e) {
-                    throw new IOExceptionWrapper(e);
+                  } catch (Exception e) {
+                    logger.warn("Could not send message to {}", it.clientId);
+                    it.breakWithException(e);
                   }
                 });
               });
@@ -175,8 +173,9 @@ public class Server {
                 try {
                   writeUtilityMessage(SYNC_ACK, request.topic(), request.id());
                   logger.info("No clients subscribed topic={}, sent sync ack to {}", request.topic(), clientId);
-                } catch (IOException e) {
-                  throw new IOExceptionWrapper(e);
+                } catch (Exception e) {
+                  logger.warn("Could not sent sync ack to {}", clientId);
+                  breakWithException(e);
                 }
               });
             } else {
@@ -188,8 +187,9 @@ public class Server {
                   try {
                     client.writeUtilityMessage(SYNC_REQUEST, request.topic(), request.id());
                     logger.info("Sent sync request for {} to {}", request, client.clientId);
-                  } catch (IOException e) {
-                    throw new IOExceptionWrapper(e);
+                  } catch (Exception e) {
+                    logger.warn("Could not send sync request for {} to {}", request, client.clientId);
+                    client.breakWithException(e);
                   }
                 });
               });
@@ -208,24 +208,32 @@ public class Server {
                   try {
                     initiator.writeUtilityMessage(SYNC_ACK, response.topic(), response.id());
                     logger.info("Sent sync ack for {} to {}", response, initiator.clientId);
-                  } catch (IOException e) {
-                    throw new IOExceptionWrapper(e);
+                  } catch (Exception e) {
+                    logger.warn("Could not sent sync ack for {} to {}", response, initiator.clientId);
+                    initiator.breakWithException(e);
                   }
                 });
               }
             }
           }
-          default -> logger.error("Unexpected mark byte {}", mark);
+          default -> throw new IOException("Unexpected mark byte " + mark);
         }
       }
+    }
+
+    private void breakWithException(Exception e) {
+      replyException = e;
+      try {
+        socket.shutdownInput();  // break blocking read
+      } catch (Exception ignored) {}
     }
 
     @Override
     void close() {
       clientConnections.remove(this);
       topicSubscriptions.values().forEach(it -> it.remove(this));
-      replyExecutor.shutdown();
       super.close();
+      logger.info("Connection closed for client {}", clientId);
     }
   }
 }

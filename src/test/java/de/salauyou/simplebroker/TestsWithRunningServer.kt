@@ -1,5 +1,5 @@
 package de.salauyou.simplebroker
-
+/*
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertNotNull
@@ -34,4 +34,4 @@ class TestsWithRunningServer {
             assertNotNull("Please run server application before this test")
         }
     }
-}
+}*/

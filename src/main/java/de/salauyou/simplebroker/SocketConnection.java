@@ -21,7 +21,7 @@ abstract class SocketConnection {
   protected final static byte SYNC_REQUEST = 4;
   protected final static byte SYNC_ACK = 5;
 
-  private final Socket socket;
+  protected final Socket socket;
   protected final InputStream input;
   protected final OutputStream output;
 
@@ -109,10 +109,6 @@ abstract class SocketConnection {
     try {
       socket.close();
     } catch (IOException ignored) {}
-  }
-
-  boolean isClosed() {
-    return socket.isClosed();
   }
 
   static ExecutorService singleThreadExecutor(String threadName) {

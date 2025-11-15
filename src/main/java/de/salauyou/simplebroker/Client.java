@@ -119,14 +119,14 @@ public class Client {
 
     protected void run() throws IOException {
       while (true) {
-        if (isClosed()) {
-          logger.info("Connection is closed");
-          return;
-        }
         var mark = readMark();
         switch (mark) {
           case CLOSED -> {
-            logger.info("Server closed connection");
+            if (connection == null) {
+              return; // already stopped
+            }
+            logger.info("Server closed connection, client will be stopped");
+            stop();
             return;
           }
           case SUBSCRIBE_ACK -> {
@@ -163,7 +163,7 @@ public class Client {
               promise.complete(null);
             }
           }
-          default -> logger.error("Unexpected mark byte {}", mark);
+          default -> throw new IOException("Unexpected mark byte " + mark);
         }
       }
     }

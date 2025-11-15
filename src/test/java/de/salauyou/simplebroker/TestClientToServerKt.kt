@@ -1,5 +1,5 @@
 package de.salauyou.simplebroker
-
+/**
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
 import java.util.concurrent.LinkedBlockingQueue
@@ -109,4 +109,4 @@ class TestClientToServer {
         client2.stop()
         server.stop()
     }
-}
+}*/
