@@ -13,17 +13,19 @@ import java.util.concurrent.Executors;
 abstract class SocketConnection {
 
   // mark bytes
-  protected final static byte CLOSED = -1;
-  protected final static byte CLIENT_ID = 0;
-  protected final static byte SUBSCRIBE_REQUEST = 1;
-  protected final static byte SUBSCRIBE_ACK = 2;
-  protected final static byte MESSAGE = 3;
-  protected final static byte SYNC_REQUEST = 4;
-  protected final static byte SYNC_ACK = 5;
+  protected final static int CLOSED = -1;
+  protected final static int HANDSHAKE = 1;
+  protected final static int SUBSCRIBE_REQUEST = 2;
+  protected final static int SUBSCRIBE_ACK = 3;
+  protected final static int MESSAGE = 4;
+  protected final static int SYNC_MESSAGE = 5;
+  protected final static int MESSAGE_ACK = 6;
 
   protected final Socket socket;
   protected final InputStream input;
   protected final OutputStream output;
+
+  private final ByteBuffer buffer = ByteBuffer.allocate(270);  // reusable write buffer
 
   SocketConnection(Socket socket) throws IOException {
     this.socket = socket;
@@ -31,72 +33,42 @@ abstract class SocketConnection {
     this.output = socket.getOutputStream();
   }
 
-  byte readMark() throws IOException {
+  int readMark() throws IOException {
     try {
-      return (byte) input.read();
+      return input.read();
     } catch (SocketException se) {
       return CLOSED;
     }
   }
 
-  void writeClientId(String id) throws IOException {
-    synchronized (output) {
-      var idBytes = id.getBytes(StandardCharsets.UTF_8);
-      var bytes = ByteBuffer.allocate(5 + idBytes.length)
-        .put(CLIENT_ID)           // mark - 1b
-        .putInt(idBytes.length)   // id length - 4b
-        .put(idBytes)             // id
-        .array();
-      output.write(bytes);
-      output.flush();
+  void writeMessage(int mark, int id, String topic, byte[] body) throws IOException {
+    var topicBytes = topic.getBytes(StandardCharsets.UTF_8);
+    checkLength(topicBytes);
+    buffer.clear()
+      .put((byte) mark)
+      .putInt(id)
+      .put((byte) topicBytes.length)
+      .put(topicBytes);
+    if (body != null) {
+      buffer.putInt(body.length);
     }
-  }
-
-  void writeUtilityMessage(byte type, String topic, long id) throws IOException {
-    synchronized (output) {
-      var topicNameBytes = topic.getBytes(StandardCharsets.UTF_8);
-      var bytes = ByteBuffer.allocate(13 + topicNameBytes.length)
-        .put(type)                       // mark - 1b
-        .putInt(topicNameBytes.length)   // topic length - 4b
-        .put(topicNameBytes)             // topic
-        .putLong(id)                     // id - 8b
-        .array();
-      output.write(bytes);
-      output.flush();
+    output.write(buffer.array(), 0, buffer.position());
+    if (body != null) {
+      output.write(body);
     }
+    output.flush();
   }
 
-  void writeMessage(Message message) throws IOException {
-    synchronized (output) {
-      var topicBytes = message.getTopic().getBytes(StandardCharsets.UTF_8);
-      var bytes = ByteBuffer.allocate(9 + topicBytes.length)
-        .put(MESSAGE)                       // mark - 1b
-        .putInt(topicBytes.length)          // topic length - 4b
-        .put(topicBytes)                    // topic
-        .putInt(message.getBody().length)   // message length - 4b
-        .array();
-      output.write(bytes);
-      output.write(message.getBody());      // message
-      output.flush();
+  MessageImpl readMessage(boolean hasBody) throws IOException {
+    var id = ByteBuffer.wrap(input.readNBytes(4)).getInt();
+    var topicLength = input.read();
+    var topic = new String(input.readNBytes(topicLength), StandardCharsets.UTF_8);
+    byte[] body = null;
+    if (hasBody) {
+      var bodyLength = ByteBuffer.wrap(input.readNBytes(4)).getInt();
+      body = input.readNBytes(bodyLength);
     }
-  }
-
-  UtilityMessage readUtilityMessage() throws IOException {
-    var topic = readText();
-    var id = ByteBuffer.wrap(input.readNBytes(8)).getLong();
-    return new UtilityMessage(topic, id);
-  }
-
-  Message readMessage() throws IOException {
-    var topic = readText();
-    var messageLength = ByteBuffer.wrap(input.readNBytes(4)).getInt();
-    var bytes = input.readNBytes(messageLength);
-    return new MessageImpl(topic, bytes);
-  }
-
-  String readText() throws IOException {
-    var topicNameLength = ByteBuffer.wrap(input.readNBytes(4)).getInt();
-    return new String(input.readNBytes(topicNameLength), StandardCharsets.UTF_8);
+    return new MessageImpl(id, topic, body);
   }
 
   void close() {
@@ -111,6 +83,12 @@ abstract class SocketConnection {
     } catch (IOException ignored) {}
   }
 
+  static void checkLength(byte[] bytes) {
+    if (bytes.length > 255) {
+      throw new IllegalArgumentException("Maximum allowed length 255 bytes");
+    }
+  }
+
   static ExecutorService singleThreadExecutor(String threadName) {
     var executor = Executors.newSingleThreadExecutor();
     executor.submit(() -> {
@@ -119,7 +97,11 @@ abstract class SocketConnection {
     return executor;
   }
 
-  record MessageImpl(String topic, byte[] bytes) implements Message {
+  record MessageImpl(int id, String topic, byte[] body) implements Message {
+    @Override
+    public int getId() {
+      return id;
+    }
 
     @Override
     public String getTopic() {
@@ -128,22 +110,17 @@ abstract class SocketConnection {
 
     @Override
     public byte[] getBody() {
-      return bytes;
+      return body;
     }
-  }
 
-  record UtilityMessage(String topic, long id) {
-    @Override
-    public String toString() {
-      return "topic=" + topic + ", id=" + Long.toHexString(id);
+    String hexId() {
+      return Integer.toHexString(id);
     }
   }
 
   static class IOExceptionWrapper extends RuntimeException {
-    final IOException cause;
     IOExceptionWrapper(IOException e) {
       super(e);
-      cause = e;
     }
   }
 }

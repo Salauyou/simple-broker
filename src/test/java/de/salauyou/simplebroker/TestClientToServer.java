@@ -18,7 +18,7 @@ public class TestClientToServer {
   final int port = 7000;
 
   @Test
-  void clientSendMessagesEachOther() throws ExecutionException, InterruptedException {
+  void clientsSendMessagesEachOther() throws ExecutionException, InterruptedException {
     var q1 = new LinkedBlockingQueue<>(List.of("A", "B", "C", "D"));
     var q2 = new LinkedBlockingQueue<String>();
 
@@ -33,21 +33,24 @@ public class TestClientToServer {
     client2.start();
 
     // transfer from q1 to q2 via topic 2
-    client2.subscribe(topic2, message ->
-      q2.add(new String(message.getBody(), StandardCharsets.UTF_8))
-    ).get();
+    client2.subscribe(topic2, message -> {
+      assertEquals(topic2, message.getTopic());
+      q2.add(new String(message.getBody(), StandardCharsets.UTF_8));
+    }).get();
 
     for (var it : q1) {
-      client1.send(topic2, it.getBytes(StandardCharsets.UTF_8));
+      client1.send(topic2, it.getBytes(StandardCharsets.UTF_8), false);
       Thread.sleep(100);  // slow production
     }
-    client1.sync(topic2).get();  // wait until all sent messages consumed
+    // send additional sync message and wait consumption
+    client1.send(topic2, "sync 1".getBytes(StandardCharsets.UTF_8), true).get();
 
-    assertEquals(q1.stream().toList(), q2.stream().toList());
+    assertEquals(List.of("A", "B", "C", "D", "sync 1"), q2.stream().toList());
 
     // transfer back from q2 to q1 via topic 1
     q1.clear();
     client1.subscribe(topic1, message -> {
+      assertEquals(topic1, message.getTopic());
       q1.add(new String(message.getBody(), StandardCharsets.UTF_8));
       try {
         Thread.sleep(100);  // slow consumption
@@ -57,21 +60,22 @@ public class TestClientToServer {
     }).get();
 
     for (var it : q2) {
-      client2.send(topic1, it.getBytes(StandardCharsets.UTF_8));
+      client2.send(topic1, it.getBytes(StandardCharsets.UTF_8), false);
     }
-    client2.sync(topic1).get();
-    assertEquals(q2.stream().toList(), q1.stream().toList());
+    // send additional sync message and wait consumption
+    client2.send(topic1, "sync 2".getBytes(StandardCharsets.UTF_8), true).get();
+
+    assertEquals(List.of("A", "B", "C", "D", "sync 1", "sync 2"), q1.stream().toList());
 
     logger.info("--------- stopping client1 -----------");
     client1.stop();
 
     // when client1 is stopped, it will not accept anything more
     for (var it : q2) {
-      client2.send(topic1, it.getBytes(StandardCharsets.UTF_8));
+      client2.send(topic1, it.getBytes(StandardCharsets.UTF_8), true).get();
     }
-    client2.sync(topic1).get();
 
-    assertEquals(q2.stream().toList(), q1.stream().toList());
+    assertEquals(List.of("A", "B", "C", "D", "sync 1", "sync 2"), q1.stream().toList());
 
     logger.info("--------- stopping client2 -----------");
     client2.stop();

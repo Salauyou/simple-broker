@@ -5,26 +5,24 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
-import static de.salauyou.simplebroker.SocketConnection.singleThreadExecutor;
-import static de.salauyou.simplebroker.SocketConnection.IOExceptionWrapper;
+import static de.salauyou.simplebroker.SocketConnection.*;
 
 public class Client {
 
   private static final Logger logger = LoggerFactory.getLogger(Client.class);
-  private static final AtomicInteger COUNTER = new AtomicInteger();
 
   private final Executor receiverExecutor;
   private final Map<String, Consumer<? super Message>> topicConsumers = new ConcurrentHashMap<>();
-  private final Map<String, CompletableFuture<Void>> pendingSubscribeRequests = new ConcurrentHashMap<>();
-  private final Map<Long, CompletableFuture<Void>> pendingSyncRequests = new ConcurrentHashMap<>();
+  private final Map<Integer, CompletableFuture<Void>> pendingAcks = new ConcurrentHashMap<>();
+  private final AtomicInteger idCounter = new AtomicInteger(hashCode());   // will be reinitialized on handshake
 
   private final String clientId;
   private final String host;
@@ -33,33 +31,37 @@ public class Client {
   private volatile Connection connection;
 
   public Client(String clientId, String host, int port) {
+    checkLength(clientId.getBytes(StandardCharsets.UTF_8));
     this.host = host;
     this.port = port;
     this.clientId = clientId;
-    var threadName = "broker-conn-" + COUNTER.incrementAndGet() + "-" + clientId;
-    receiverExecutor = singleThreadExecutor(threadName);
+    receiverExecutor = singleThreadExecutor("broker-conn-" + clientId);
   }
 
   public synchronized void start() {
     if (connection != null) {
-      logger.info("Client {} already connected", clientId);
+      logger.info("Client {} already started", clientId);
       return;
     }
     logger.info("Connecting the client {} to {}:{}", clientId, host, port);
     try {
       var socket = new Socket(host, port);
       socket.setKeepAlive(true);
-      connection = new Connection(socket);
-      connection.writeClientId(clientId);
+      var conn = new Connection(socket);
+      synchronized (conn.output) {
+        conn.writeMessage(HANDSHAKE, idCounter.incrementAndGet(), clientId, null);
+        logger.info("Client handshake request sent");
+      }
       receiverExecutor.execute(() -> {
         try {
-          connection.run();
+          conn.run();
         } catch (Exception e) {
           logger.error("Stopping " + clientId + " due to exception", e);
           stop();
         }
       });
-      logger.info("Connected the client");
+      this.connection = conn;
+      logger.info("Started the client");
     } catch (IOException e) {
       throw new IOExceptionWrapper(e);
     }
@@ -67,40 +69,35 @@ public class Client {
 
   public synchronized void stop() {
     if (connection == null) {
-      logger.info("Client {} already stopped", clientId);
+      logger.info("Client {} not started", clientId);
       return;
     }
+    logger.info("Stopping client {}", clientId);
     connection.close();
     connection = null;
     topicConsumers.clear();
-    pendingSyncRequests.clear();
-    pendingSubscribeRequests.clear();
-    logger.info("Stopped the client");
+    pendingAcks.values().forEach(it ->
+      it.completeExceptionally(new RuntimeException("Client stopped"))
+    );
+    pendingAcks.clear();
+    logger.info("Stopped client {}", clientId);
   }
 
   /**
-   * Sends data into topic. For delivery control, use [sync] method
-   */
-  public void send(String topic, byte[] bytes) {
-    requireConnection().sendToTopic(topic, bytes);
-  }
-
-  /**
-   * Subscribes this client to given topic. Returned [Future]
-   * will complete when server acknowledges the subscription
+   * Subscribes this client to given topic. Returned promise will complete
+   * after server acknowledges the subscription
    */
   public CompletableFuture<?> subscribe(String topic, Consumer<? super Message> consumer) {
-    return requireConnection().subscribeToTopic(topic, consumer);
+    return requireConnection().subscribe(topic, consumer);
   }
 
   /**
-   * Sends a sync signal into given topic. Returned [Future] will
-   * complete when all consumers, subscribed to this topic,
-   * acknowledge this signal, meaning that they have consumed all
-   * previous messages sent by this client
+   * Sends message into topic. If sync=false, returned promise is already completed.
+   * If sync=true, it will complete after all topic subscribers consume this message
+   * normally or exceptionally
    */
-  public CompletableFuture<?> sync(String topic) {
-    return requireConnection().sync(topic);
+  public CompletableFuture<?> send(String topic, byte[] body, boolean sync) {
+    return requireConnection().send(topic, body, sync);
   }
 
   private Connection requireConnection() {
@@ -117,99 +114,100 @@ public class Client {
       super(socket);
     }
 
-    protected void run() throws IOException {
+    private void run() throws IOException {
       while (true) {
         var mark = readMark();
         switch (mark) {
           case CLOSED -> {
             if (connection == null) {
-              return; // already stopped
+              return;  // already stopped
             }
             logger.info("Server closed connection, client will be stopped");
             stop();
             return;
           }
+          case HANDSHAKE -> {
+            var msg = readMessage(false);
+            logger.info("Received handshake response, seq={}", msg.id());
+            idCounter.set(msg.id() << 20);
+          }
           case SUBSCRIBE_ACK -> {
-            var response = readUtilityMessage();
-            logger.info("Received subscription ack for topic={}", response.topic());
-            var promise = pendingSubscribeRequests.remove(response.topic());
+            var msg = readMessage(false);
+            logger.info("Received subscription ack for topic={}", msg.topic());
+            var promise = pendingAcks.remove(msg.id());
             if (promise != null) {
               promise.complete(null);
             }
           }
-          case MESSAGE -> {
-            var message = readMessage();
-            logger.info("Received message from topic={} ({} bytes)", message.getTopic(), message.getBody().length);
-            var consumer = topicConsumers.get(message.getTopic());
+          case MESSAGE, SYNC_MESSAGE -> {
+            var msg = readMessage(true);
+            var sync = (mark == SYNC_MESSAGE);
+            logger.info("Received {} id={} from topic={} ({} bytes)",
+              (sync ? "sync message" : "message"), msg.hexId(), msg.topic(), msg.body().length);
+            var consumer = topicConsumers.get(msg.topic());
             if (consumer != null) {
               try {
-                consumer.accept(message);
+                consumer.accept(msg);
               } catch (Exception e) {
                 logger.error("Uncaught exception when consuming message", e);
               }
             }
+            if (mark == SYNC_MESSAGE) {
+              synchronized (connection.output) {
+                writeMessage(MESSAGE_ACK, msg.id(), msg.topic(), null);
+              }
+              logger.info("Sent message ack id={}", msg.hexId());
+            }
           }
-          case SYNC_REQUEST -> {
-            var request = readUtilityMessage();
-            logger.info("Received sync request for {}", request);
-            writeUtilityMessage(SYNC_ACK, request.topic(), request.id());
-            logger.info("Acked sync request {}", request);
-          }
-          case SYNC_ACK -> {
-            var response = readUtilityMessage();
-            logger.info("Received sync ack for {}", response);
-            var promise = pendingSyncRequests.remove(response.id());
+          case MESSAGE_ACK -> {
+            var msg = readMessage(false);
+            logger.info("Received message ack id={}", msg.hexId());
+            var promise = pendingAcks.remove(msg.id());
             if (promise != null) {
               promise.complete(null);
             }
           }
-          default -> throw new IOException("Unexpected mark byte " + mark);
+          default -> throw new IOException("Unexpected mark " + mark);
         }
       }
     }
 
-    void sendToTopic(String topic, byte[] bytes) {
-      logger.info("Sending message to topic={} ({} bytes)", topic, bytes.length);
-      var message = new MessageImpl(topic, bytes);
+    private CompletableFuture<?> subscribe(String topic, Consumer<? super Message> consumer) {
+      topicConsumers.put(topic, consumer);
+      var id = idCounter.incrementAndGet();
+      var ackPromise = pendingAcks.computeIfAbsent(id, it -> new CompletableFuture<>());
+      logger.info("Sending subscription request id={} for topic={}", Integer.toHexString(id), topic);
       try {
-        writeMessage(message);
+        synchronized (connection.output) {
+          writeMessage(SUBSCRIBE_REQUEST, id, topic, null);
+        }
+        logger.info("Subscription request sent");
+      } catch (IOException e) {
+        logger.warn("Could not send subscription request");
+        pendingAcks.remove(id);
+        throw new IOExceptionWrapper(e);
+      }
+      return ackPromise;
+    }
+
+    private CompletableFuture<?> send(String topic, byte[] body, boolean sync) {
+      var id = idCounter.incrementAndGet();
+      var ackPromise = sync
+        ? pendingAcks.computeIfAbsent(id, it -> new CompletableFuture<>())
+        : CompletableFuture.completedFuture(null);
+      logger.info("Sending {} id={} into topic={} ({} bytes)",
+        (sync ? "sync message" : "message"), Integer.toHexString(id), topic, body.length);
+      try {
+        synchronized (connection.output) {
+          writeMessage((sync ? SYNC_MESSAGE : MESSAGE), id, topic, body);
+        }
         logger.info("Message sent");
       } catch (IOException e) {
         logger.warn("Could not send message");
+        pendingAcks.remove(id);
         throw new IOExceptionWrapper(e);
       }
-    }
-
-    CompletableFuture<?> subscribeToTopic(String topic, Consumer<? super Message> consumer) {
-      topicConsumers.put(topic, consumer);
-      logger.info("Sending subscription request for topic={}", topic);
-      var promise = pendingSubscribeRequests.computeIfAbsent(topic, it -> new CompletableFuture<>());
-      try {
-        writeUtilityMessage(SUBSCRIBE_REQUEST, topic, 0L);
-        logger.info("Sent subscription request for topic={}", topic);
-      } catch (IOException e) {
-        logger.warn("Could not send subscription request for topic={}", topic);
-        promise.completeExceptionally(e);
-        pendingSubscribeRequests.remove(topic);
-        throw new IOExceptionWrapper(e);
-      }
-      return promise;
-    }
-
-    CompletableFuture<?> sync(String topic) {
-      logger.info("Sending sync request for topic={}", topic);
-      var id = UUID.randomUUID().getLeastSignificantBits();
-      var promise = pendingSyncRequests.computeIfAbsent(id, it -> new CompletableFuture<>());
-      try {
-        writeUtilityMessage(SYNC_REQUEST, topic, id);
-        logger.info("Sent sync request for topic={}, id={}", topic, Long.toHexString(id));
-      } catch (IOException e) {
-        logger.warn("Could not sent sync request for topic={}, id={}", topic, Long.toHexString(id));
-        promise.completeExceptionally(e);
-        pendingSyncRequests.remove(id);
-        throw new IOExceptionWrapper(e);
-      }
-      return promise;
+      return ackPromise;
     }
   }
 }

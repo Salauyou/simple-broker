@@ -1,6 +1,7 @@
 package de.salauyou.simplebroker;
 
 public interface Message {
-    String getTopic();
-    byte[] getBody();
+  int getId();
+  String getTopic();
+  byte[] getBody();
 }

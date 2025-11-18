@@ -1,6 +1,5 @@
 package de.salauyou.simplebroker;
 
-import javafx.util.Pair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -28,7 +27,7 @@ public class Server {
   private final AtomicInteger clientConnectionCounter = new AtomicInteger();
   private final Queue<ClientConnection> clientConnections = new ConcurrentLinkedQueue<>();
   private final Map<String, Map<ClientConnection, Boolean>> topicSubscriptions = new ConcurrentHashMap<>();
-  private final Map<Long, Pair<ClientConnection, Queue<ClientConnection>>> pendingSyncRequests = new ConcurrentHashMap<>();
+  private final Map<Integer, PendingAck> pendingAcks = new ConcurrentHashMap<>();
 
   private volatile ServerSocket serverSocket;
 
@@ -36,9 +35,9 @@ public class Server {
     this.port = port;
   }
 
-  synchronized void start() {
+  public synchronized void start() {
     if (serverSocket != null) {
-      logger.info("Already started");
+      logger.debug("Already started");
     }
     logger.info("Starting the server at port {}", port);
     try {
@@ -57,9 +56,9 @@ public class Server {
     }
   }
 
-  synchronized void stop() {
+  public synchronized void stop() {
     if (serverSocket == null) {
-      logger.info("Not started");
+      logger.debug("Not started");
     }
     logger.info("Stopping the server");
     clientConnections.forEach(ClientConnection::close);
@@ -67,7 +66,7 @@ public class Server {
       serverSocket.close();
     } catch (IOException ignored) {}
     topicSubscriptions.clear();
-    pendingSyncRequests.clear();
+    pendingAcks.clear();
     serverSocket = null;
     logger.info("Stopped the server");
   }
@@ -100,11 +99,11 @@ public class Server {
   }
 
   private class ClientConnection extends SocketConnection {
-    private final int seq = clientConnectionCounter.incrementAndGet();
-    private final ExecutorService replyExecutor = singleThreadExecutor("client-" + seq + "-out");
-    private final SocketAddress remoteAddress;
     private String clientId;
-    private volatile Exception replyException = null;
+    private final int seq = clientConnectionCounter.incrementAndGet();
+    private final SocketAddress remoteAddress;
+    private final ExecutorService writeExecutor = singleThreadExecutor("client-" + seq + "-out");
+    private volatile Exception writeException = null;
 
     private ClientConnection(Socket socket) throws IOException {
       super(socket);
@@ -112,10 +111,30 @@ public class Server {
       this.clientId = remoteAddress.toString();
     }
 
-    void run() throws Exception {
+    private void run() throws Exception {
+      switch (readMark()) {
+        case CLOSED -> {
+          logger.info("Client {} closed connection", clientId);
+          return;
+        }
+        case HANDSHAKE -> {
+          clientId = readMessage(false).topic() + '/' + remoteAddress;
+          logger.info("Received handshake reques from {}", clientId);
+          writeExecutor.execute(() -> {
+            try {
+              writeMessage(HANDSHAKE, seq, "", null);
+              logger.debug("Sent handshake response to {}, seq={}", clientId, seq);
+            } catch (Exception e) {
+              logger.error("Could not send handshake response", e);
+              breakWithException(e);
+            }
+          });
+        }
+        default -> throw new IllegalStateException("Unexpected mark byte. Client must send handshake as first request");
+      }
       while (true) {
-        if (replyException != null) {
-          throw replyException;  // break the reading loop and propagate
+        if (writeException != null) {
+          throw writeException;  // break the reading loop and propagate
         }
         var mark = readMark();
         switch (mark) {
@@ -123,106 +142,87 @@ public class Server {
             logger.info("Client {} closed connection", clientId);
             return;
           }
-          case CLIENT_ID -> {
-            var id = readText();
-            clientId = id + remoteAddress;
-            logger.info("Received clientId from {}", clientId);
-          }
           case SUBSCRIBE_REQUEST -> {
-            var request = readUtilityMessage();
-            logger.info("Received subscription request for topic=${request.topic} from $clientId");
-            topicSubscriptions.computeIfAbsent(request.topic(), it -> new ConcurrentHashMap<>()).putIfAbsent(this, true);
-            replyExecutor.execute(() -> {
+            var msg = readMessage(false);
+            logger.info("Received subscription request id={} for topic={} from {}", msg.hexId(), msg.topic(), clientId);
+            topicSubscriptions
+              .computeIfAbsent(msg.topic(), it -> new ConcurrentHashMap<>())
+              .putIfAbsent(this, true);
+            writeExecutor.execute(() -> {
               try {
-                writeUtilityMessage(SUBSCRIBE_ACK, request.topic(), 0);
-                logger.info("Sent subscription ack for topic={} client={}", request.topic(), clientId);
+                writeMessage(SUBSCRIBE_ACK, msg.id(), msg.topic(), null);
+                logger.debug("Sent subscription ack id={} for topic={} to {}", msg.hexId(), msg.topic(), clientId);
               } catch (Exception e) {
-                logger.warn("Could not send subscription ack for topic={} client={}", request.topic(), clientId);
+                logger.error("Could not send subscription ack id=" + msg.hexId(), e);
                 breakWithException(e);
               }
             });
           }
-          case MESSAGE -> {
-            var message = readMessage();
-            var topic = message.getTopic();
-            logger.info("Received message for topic={} from {} ({} bytes)", topic, clientId, message.getBody().length);
-            var clients = topicSubscriptions.getOrDefault(topic, Collections.emptyMap());
+          case MESSAGE, SYNC_MESSAGE -> {
+            var msg = readMessage(true);
+            var sync = (mark == SYNC_MESSAGE);
+            logger.debug("Received {} id={} for topic={} from {} ({} bytes)",
+              (sync ? "sync message" : "message"), msg.hexId(), msg.topic(), clientId, msg.getBody().length
+            );
+            var clients = topicSubscriptions.getOrDefault(msg.topic(), Collections.emptyMap()).keySet();
             if (clients.isEmpty()) {
-              logger.info("No clients subscribed topic={}, message dropped", topic);
-            } else {
-              logger.info("Sending message to subscribed clients ({})", clients.size());
-              clients.keySet().forEach(it -> {
-                it.replyExecutor.execute(() -> {
+              logger.debug("No clients subscribed topic={}, message dropped", msg.topic());
+              if (sync) {
+                writeExecutor.execute(() -> {
                   try {
-                    it.writeMessage(message);
-                    logger.info("Sent message to {}", it.clientId);
+                    writeMessage(MESSAGE_ACK, msg.id(), msg.topic(), null);
+                    logger.debug("Sent immediate message ack id={} to {}", msg.hexId(), clientId);
                   } catch (Exception e) {
-                    logger.warn("Could not send message to {}", it.clientId);
-                    it.breakWithException(e);
+                    logger.error("Could not sent message ack id=" + msg.hexId(), e);
+                    breakWithException(e);
                   }
                 });
-              });
-            }
-          }
-          case SYNC_REQUEST -> {
-            var request = readUtilityMessage();
-            logger.info("Received sync request for {} from {}", request, clientId);
-            var subscribedClients = topicSubscriptions.getOrDefault(request.topic(), Collections.emptyMap());
-            if (subscribedClients.isEmpty()) {
-              replyExecutor.execute(() -> {
-                try {
-                  writeUtilityMessage(SYNC_ACK, request.topic(), request.id());
-                  logger.info("No clients subscribed topic={}, sent sync ack to {}", request.topic(), clientId);
-                } catch (Exception e) {
-                  logger.warn("Could not sent sync ack to {}", clientId);
-                  breakWithException(e);
-                }
-              });
+              }
             } else {
-              subscribedClients.keySet().forEach(client -> {
-                pendingSyncRequests.computeIfAbsent(request.id(), it -> new Pair<>(this, new ConcurrentLinkedQueue<>()))
-                  .getValue()
-                  .add(client);
-                client.replyExecutor.execute(() -> {
+              if (sync) {
+                pendingAcks.put(msg.id(), new PendingAck(this, new ConcurrentLinkedQueue<>(clients)));
+              }
+              logger.debug("Sending message to subscribed clients ({})", clients.size());
+              for (var client : clients) {
+                client.writeExecutor.execute(() -> {
                   try {
-                    client.writeUtilityMessage(SYNC_REQUEST, request.topic(), request.id());
-                    logger.info("Sent sync request for {} to {}", request, client.clientId);
+                    client.writeMessage((sync ? SYNC_MESSAGE : MESSAGE), msg.id(), msg.topic(), msg.body());
+                    logger.debug("Sent {} id={} to {}", (sync ? "sync message" : "message"), msg.hexId(), client.clientId);
                   } catch (Exception e) {
-                    logger.warn("Could not send sync request for {} to {}", request, client.clientId);
+                    logger.error("Could not send message id=" + msg.hexId(), e);
                     client.breakWithException(e);
                   }
                 });
-              });
+              }
             }
           }
-          case SYNC_ACK -> {
-            var response = readUtilityMessage();
-            logger.info("Received sync ack for {} from {}", response, clientId);
-            var pendingSyncRequest = pendingSyncRequests.get(response.id());
-            if (pendingSyncRequest != null) {
-              var initiator = pendingSyncRequest.getKey();
-              var awaitingClients = pendingSyncRequest.getValue();
-              awaitingClients.removeIf(it -> it == this);
-              if (awaitingClients.isEmpty()) {
-                initiator.replyExecutor.execute(() -> {
+          case MESSAGE_ACK -> {
+            var msg = readMessage(false);
+            logger.debug("Received message ack id={} from {}", msg.hexId(), clientId);
+            var pendingAck = pendingAcks.get(msg.id());
+            if (pendingAck != null) {
+              pendingAck.pendingClients.removeIf(it -> it == this);
+              if (pendingAck.pendingClients.isEmpty() && pendingAcks.remove(msg.id()) != null) {
+                var initiator = pendingAck.initiator;
+                initiator.writeExecutor.execute(() -> {
                   try {
-                    initiator.writeUtilityMessage(SYNC_ACK, response.topic(), response.id());
-                    logger.info("Sent sync ack for {} to {}", response, initiator.clientId);
+                    initiator.writeMessage(MESSAGE_ACK, msg.id(), msg.topic(), null);
+                    logger.debug("Sent message ack id={} to {}", msg.hexId(), initiator.clientId);
                   } catch (Exception e) {
-                    logger.warn("Could not sent sync ack for {} to {}", response, initiator.clientId);
+                    logger.error("Could not sent message ack id=" + msg.hexId(), e);
                     initiator.breakWithException(e);
                   }
                 });
               }
             }
           }
-          default -> throw new IOException("Unexpected mark byte " + mark);
+          default -> throw new IllegalStateException("Unexpected mark 0x" + Integer.toHexString(mark));
         }
       }
     }
 
     private void breakWithException(Exception e) {
-      replyException = e;
+      writeException = e;
       try {
         socket.shutdownInput();  // break blocking read
       } catch (Exception ignored) {}
@@ -230,10 +230,12 @@ public class Server {
 
     @Override
     void close() {
+      super.close();
       clientConnections.remove(this);
       topicSubscriptions.values().forEach(it -> it.remove(this));
-      super.close();
       logger.info("Connection closed for client {}", clientId);
     }
   }
+
+  private record PendingAck(ClientConnection initiator, Queue<ClientConnection> pendingClients) {}
 }
