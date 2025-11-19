@@ -1,8 +1,5 @@
 package de.salauyou.simplebroker;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -13,13 +10,15 @@ import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Logger;
 
 import static de.salauyou.simplebroker.SocketConnection.IOExceptionWrapper;
 import static de.salauyou.simplebroker.SocketConnection.singleThreadExecutor;
+import static java.util.logging.Level.*;
 
 public class Server {
 
-  private static final Logger logger = LoggerFactory.getLogger("server");
+  private static final Logger logger = Logger.getLogger("server");
 
   private final int port;
   private final Executor clientConnectionListeningExecutor = singleThreadExecutor("server");
@@ -37,16 +36,16 @@ public class Server {
 
   public synchronized void start() {
     if (serverSocket != null) {
-      logger.debug("Already started");
+      logger.log(FINE, "Already started");
     }
-    logger.info("Starting the server at port {}", port);
+    logger.log(INFO, "Starting the server at port {0}", port);
     try {
       serverSocket = new ServerSocket(port);
       clientConnectionListeningExecutor.execute(() -> {
         try {
           listenClientConnections();
         } catch (Exception e) {
-          logger.error("Stopping server due to exception", e);
+          logger.log(SEVERE, "Stopping server due to exception", e);
           stop();
         }
       });
@@ -58,7 +57,7 @@ public class Server {
 
   public synchronized void stop() {
     if (serverSocket == null) {
-      logger.debug("Not started");
+      logger.log(FINE, "Not started");
     }
     logger.info("Stopping the server");
     clientConnections.forEach(ClientConnection::close);
@@ -77,12 +76,12 @@ public class Server {
         var socket = serverSocket.accept();
         var connection = new ClientConnection(socket);
         clientConnections.add(connection);
-        logger.info("Client {} connected to server", connection.clientId);
+        logger.log(INFO, "Client {0} connected to server", connection.clientId);
         var clientConnectionThread = clientConnectionThreadFactory.newThread(() -> {
           try {
             connection.run();
           } catch (Exception e) {
-            logger.error("Closing connection " + connection.clientId + " due to exception", e);
+            logger.log(SEVERE, "Closing connection " + connection.clientId + " due to exception", e);
           } finally {
             connection.close();
           }
@@ -114,18 +113,18 @@ public class Server {
     private void run() throws Exception {
       switch (readMark()) {
         case CLOSED -> {
-          logger.info("Client {} closed connection", clientId);
+          logger.log(INFO, "Client {0} closed connection", clientId);
           return;
         }
         case HANDSHAKE -> {
           clientId = readMessage(false).topic() + '/' + remoteAddress;
-          logger.info("Received handshake reques from {}", clientId);
+          logger.log(INFO, "Received handshake request from {0}", clientId);
           writeExecutor.execute(() -> {
             try {
               writeMessage(HANDSHAKE, seq, "", null);
-              logger.debug("Sent handshake response to {}, seq={}", clientId, seq);
+              logger.log(INFO, "Sent handshake response to {0}, seq={1}", new Object[]{clientId, seq});
             } catch (Exception e) {
-              logger.error("Could not send handshake response", e);
+              logger.log(SEVERE, "Could not send handshake response", e);
               breakWithException(e);
             }
           });
@@ -139,21 +138,21 @@ public class Server {
         var mark = readMark();
         switch (mark) {
           case CLOSED -> {
-            logger.info("Client {} closed connection", clientId);
+            logger.log(INFO, "Client {0} closed connection", clientId);
             return;
           }
           case SUBSCRIBE_REQUEST -> {
             var msg = readMessage(false);
-            logger.info("Received subscription request id={} for topic={} from {}", msg.hexId(), msg.topic(), clientId);
+            logger.log(INFO, "Received subscription request id={0} for topic={1} from {2}", new Object[]{msg.hexId(), msg.topic(), clientId});
             topicSubscriptions
               .computeIfAbsent(msg.topic(), it -> new ConcurrentHashMap<>())
               .putIfAbsent(this, true);
             writeExecutor.execute(() -> {
               try {
                 writeMessage(SUBSCRIBE_ACK, msg.id(), msg.topic(), null);
-                logger.debug("Sent subscription ack id={} for topic={} to {}", msg.hexId(), msg.topic(), clientId);
+                logger.log(FINE, "Sent subscription ack id={0} for topic={1} to {2}", new Object[]{msg.hexId(), msg.topic(), clientId});
               } catch (Exception e) {
-                logger.error("Could not send subscription ack id=" + msg.hexId(), e);
+                logger.log(SEVERE, "Could not send subscription ack id=" + msg.hexId(), e);
                 breakWithException(e);
               }
             });
@@ -161,19 +160,19 @@ public class Server {
           case MESSAGE, SYNC_MESSAGE -> {
             var msg = readMessage(true);
             var sync = (mark == SYNC_MESSAGE);
-            logger.debug("Received {} id={} for topic={} from {} ({} bytes)",
-              (sync ? "sync message" : "message"), msg.hexId(), msg.topic(), clientId, msg.getBody().length
+            logger.log(FINE, "Received {0} id={1} for topic={2} from {3} ({4} bytes)",
+              new Object[]{(sync ? "sync message" : "message"), msg.hexId(), msg.topic(), clientId, msg.getBody().length}
             );
             var clients = topicSubscriptions.getOrDefault(msg.topic(), Collections.emptyMap()).keySet();
             if (clients.isEmpty()) {
-              logger.debug("No clients subscribed topic={}, message dropped", msg.topic());
+              logger.log(FINE, "No clients subscribed topic={0}, message dropped", msg.topic());
               if (sync) {
                 writeExecutor.execute(() -> {
                   try {
                     writeMessage(MESSAGE_ACK, msg.id(), msg.topic(), null);
-                    logger.debug("Sent immediate message ack id={} to {}", msg.hexId(), clientId);
+                    logger.log(FINE, "Sent immediate message ack id={0} to {1}", new Object[]{msg.hexId(), clientId});
                   } catch (Exception e) {
-                    logger.error("Could not sent message ack id=" + msg.hexId(), e);
+                    logger.log(SEVERE, "Could not sent message ack id=" + msg.hexId(), e);
                     breakWithException(e);
                   }
                 });
@@ -182,14 +181,14 @@ public class Server {
               if (sync) {
                 pendingAcks.put(msg.id(), new PendingAck(this, new ConcurrentLinkedQueue<>(clients)));
               }
-              logger.debug("Sending message to subscribed clients ({})", clients.size());
+              logger.log(FINE, "Sending message to subscribed clients ({0})", clients.size());
               for (var client : clients) {
                 client.writeExecutor.execute(() -> {
                   try {
                     client.writeMessage((sync ? SYNC_MESSAGE : MESSAGE), msg.id(), msg.topic(), msg.body());
-                    logger.debug("Sent {} id={} to {}", (sync ? "sync message" : "message"), msg.hexId(), client.clientId);
+                    logger.log(FINE, "Sent {0} id={1} to {2}", new Object[]{(sync ? "sync message" : "message"), msg.hexId(), client.clientId});
                   } catch (Exception e) {
-                    logger.error("Could not send message id=" + msg.hexId(), e);
+                    logger.log(SEVERE, "Could not send message id=" + msg.hexId(), e);
                     client.breakWithException(e);
                   }
                 });
@@ -198,7 +197,7 @@ public class Server {
           }
           case MESSAGE_ACK -> {
             var msg = readMessage(false);
-            logger.debug("Received message ack id={} from {}", msg.hexId(), clientId);
+            logger.log(FINE, "Received message ack id={0} from {1}", new Object[]{msg.hexId(), clientId});
             var pendingAck = pendingAcks.get(msg.id());
             if (pendingAck != null) {
               pendingAck.pendingClients.removeIf(it -> it == this);
@@ -207,9 +206,9 @@ public class Server {
                 initiator.writeExecutor.execute(() -> {
                   try {
                     initiator.writeMessage(MESSAGE_ACK, msg.id(), msg.topic(), null);
-                    logger.debug("Sent message ack id={} to {}", msg.hexId(), initiator.clientId);
+                    logger.log(FINE, "Sent message ack id={0} to {1}", new Object[]{msg.hexId(), initiator.clientId});
                   } catch (Exception e) {
-                    logger.error("Could not sent message ack id=" + msg.hexId(), e);
+                    logger.log(SEVERE, "Could not sent message ack id=" + msg.hexId(), e);
                     initiator.breakWithException(e);
                   }
                 });
@@ -233,7 +232,7 @@ public class Server {
       super.close();
       clientConnections.remove(this);
       topicSubscriptions.values().forEach(it -> it.remove(this));
-      logger.info("Connection closed for client {}", clientId);
+      logger.log(INFO, "Connection closed for client {0}", clientId);
     }
   }
 

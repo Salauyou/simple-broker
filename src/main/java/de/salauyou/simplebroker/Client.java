@@ -1,8 +1,5 @@
 package de.salauyou.simplebroker;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.IOException;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
@@ -12,12 +9,14 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
+import java.util.logging.Logger;
 
 import static de.salauyou.simplebroker.SocketConnection.*;
+import static java.util.logging.Level.*;
 
 public class Client {
 
-  private static final Logger logger = LoggerFactory.getLogger(Client.class);
+  private static final Logger logger = Logger.getLogger(Client.class.getCanonicalName());
 
   private final Executor receiverExecutor;
   private final Map<String, Consumer<? super Message>> topicConsumers = new ConcurrentHashMap<>();
@@ -40,10 +39,10 @@ public class Client {
 
   public synchronized void start() {
     if (connection != null) {
-      logger.info("Client {} already started", clientId);
+      logger.log(INFO, "Client {0} already started", clientId);
       return;
     }
-    logger.info("Connecting the client {} to {}:{}", clientId, host, port);
+    logger.log(INFO, "Connecting the client {0} to {1}:{2}", new Object[]{clientId, host, port});
     try {
       var socket = new Socket(host, port);
       socket.setKeepAlive(true);
@@ -56,7 +55,7 @@ public class Client {
         try {
           conn.run();
         } catch (Exception e) {
-          logger.error("Stopping " + clientId + " due to exception", e);
+          logger.log(SEVERE, "Stopping " + clientId + " due to exception", e);
           stop();
         }
       });
@@ -69,10 +68,10 @@ public class Client {
 
   public synchronized void stop() {
     if (connection == null) {
-      logger.info("Client {} not started", clientId);
+      logger.log(INFO, "Client {0} not started", clientId);
       return;
     }
-    logger.info("Stopping client {}", clientId);
+    logger.log(INFO, "Stopping client {0}", clientId);
     connection.close();
     connection = null;
     topicConsumers.clear();
@@ -80,7 +79,7 @@ public class Client {
       it.completeExceptionally(new RuntimeException("Client stopped"))
     );
     pendingAcks.clear();
-    logger.info("Stopped client {}", clientId);
+    logger.log(INFO, "Stopped client {0}", clientId);
   }
 
   /**
@@ -128,12 +127,12 @@ public class Client {
           }
           case HANDSHAKE -> {
             var msg = readMessage(false);
-            logger.info("Received handshake response, seq={}", msg.id());
+            logger.log(INFO, "Received handshake response, seq={0}", msg.id());
             idCounter.set(msg.id() << 20);
           }
           case SUBSCRIBE_ACK -> {
             var msg = readMessage(false);
-            logger.info("Received subscription ack for topic={}", msg.topic());
+            logger.log(INFO, "Received subscription ack for topic={0}", msg.topic());
             var promise = pendingAcks.remove(msg.id());
             if (promise != null) {
               promise.complete(null);
@@ -142,26 +141,26 @@ public class Client {
           case MESSAGE, SYNC_MESSAGE -> {
             var msg = readMessage(true);
             var sync = (mark == SYNC_MESSAGE);
-            logger.info("Received {} id={} from topic={} ({} bytes)",
-              (sync ? "sync message" : "message"), msg.hexId(), msg.topic(), msg.body().length);
+            logger.log(INFO, "Received {0} id={1} from topic={2} ({3} bytes)",
+              new Object[]{(sync ? "sync message" : "message"), msg.hexId(), msg.topic(), msg.body().length});
             var consumer = topicConsumers.get(msg.topic());
             if (consumer != null) {
               try {
                 consumer.accept(msg);
               } catch (Exception e) {
-                logger.error("Uncaught exception when consuming message", e);
+                logger.log(SEVERE, "Uncaught exception when consuming message", e);
               }
             }
             if (mark == SYNC_MESSAGE) {
               synchronized (connection.output) {
                 writeMessage(MESSAGE_ACK, msg.id(), msg.topic(), null);
               }
-              logger.info("Sent message ack id={}", msg.hexId());
+              logger.log(INFO, "Sent message ack id={0}", msg.hexId());
             }
           }
           case MESSAGE_ACK -> {
             var msg = readMessage(false);
-            logger.info("Received message ack id={}", msg.hexId());
+            logger.log(INFO, "Received message ack id={0}", msg.hexId());
             var promise = pendingAcks.remove(msg.id());
             if (promise != null) {
               promise.complete(null);
@@ -176,14 +175,14 @@ public class Client {
       topicConsumers.put(topic, consumer);
       var id = idCounter.incrementAndGet();
       var ackPromise = pendingAcks.computeIfAbsent(id, it -> new CompletableFuture<>());
-      logger.info("Sending subscription request id={} for topic={}", Integer.toHexString(id), topic);
+      logger.log(INFO, "Sending subscription request id={0} for topic={1}", new Object[]{Integer.toHexString(id), topic});
       try {
         synchronized (connection.output) {
           writeMessage(SUBSCRIBE_REQUEST, id, topic, null);
         }
         logger.info("Subscription request sent");
       } catch (IOException e) {
-        logger.warn("Could not send subscription request");
+        logger.log(WARNING, "Could not send subscription request");
         pendingAcks.remove(id);
         throw new IOExceptionWrapper(e);
       }
@@ -195,15 +194,15 @@ public class Client {
       var ackPromise = sync
         ? pendingAcks.computeIfAbsent(id, it -> new CompletableFuture<>())
         : CompletableFuture.completedFuture(null);
-      logger.info("Sending {} id={} into topic={} ({} bytes)",
-        (sync ? "sync message" : "message"), Integer.toHexString(id), topic, body.length);
+      logger.log(INFO, "Sending {0} id={1} into topic={2} ({3} bytes)",
+        new Object[]{(sync ? "sync message" : "message"), Integer.toHexString(id), topic, body.length});
       try {
         synchronized (connection.output) {
           writeMessage((sync ? SYNC_MESSAGE : MESSAGE), id, topic, body);
         }
         logger.info("Message sent");
       } catch (IOException e) {
-        logger.warn("Could not send message");
+        logger.log(SEVERE, "Could not send message");
         pendingAcks.remove(id);
         throw new IOExceptionWrapper(e);
       }

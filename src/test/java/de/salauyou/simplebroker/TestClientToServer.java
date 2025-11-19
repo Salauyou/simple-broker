@@ -1,24 +1,26 @@
 package de.salauyou.simplebroker;
 
 import org.junit.jupiter.api.Test;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class TestClientToServer {
 
-  private static final Logger logger = LoggerFactory.getLogger(TestClientToServer.class);
+  //private static final Logger logger = LoggerFactory.getLogger(TestClientToServer.class);
   final String host = "localhost";
   final int port = 7000;
 
   @Test
   void clientsSendMessagesEachOther() throws ExecutionException, InterruptedException {
+    Logger.getLogger("server").setLevel(Level.FINE);
+
     var q1 = new LinkedBlockingQueue<>(List.of("A", "B", "C", "D"));
     var q2 = new LinkedBlockingQueue<String>();
 
@@ -67,7 +69,7 @@ public class TestClientToServer {
 
     assertEquals(List.of("A", "B", "C", "D", "sync 1", "sync 2"), q1.stream().toList());
 
-    logger.info("--------- stopping client1 -----------");
+    //logger.info("--------- stopping client1 -----------");
     client1.stop();
 
     // when client1 is stopped, it will not accept anything more
@@ -77,10 +79,10 @@ public class TestClientToServer {
 
     assertEquals(List.of("A", "B", "C", "D", "sync 1", "sync 2"), q1.stream().toList());
 
-    logger.info("--------- stopping client2 -----------");
+    //logger.info("--------- stopping client2 -----------");
     client2.stop();
 
-    logger.info("--------- stopping server -----------");
+    //logger.info("--------- stopping server -----------");
     server.stop();
   }
 }
