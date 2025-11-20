@@ -4,7 +4,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.StandardSocketOptions;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -45,8 +47,10 @@ public class Client {
     }
     logger.info("Connecting the client {} to {}:{}", clientId, host, port);
     try {
-      var socket = new Socket(host, port);
+      var socket = new Socket();
       socket.setKeepAlive(true);
+      socket.setOption(StandardSocketOptions.TCP_NODELAY, true);
+      socket.connect(new InetSocketAddress(host, port));
       var conn = new Connection(socket);
       synchronized (conn.output) {
         conn.writeMessage(HANDSHAKE, idCounter.incrementAndGet(), clientId, null);
