@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
@@ -24,7 +25,7 @@ public class Client {
   private final Executor receiverExecutor;
   private final Map<String, Consumer<? super Message>> topicConsumers = new ConcurrentHashMap<>();
   private final Map<Integer, CompletableFuture<Void>> pendingAcks = new ConcurrentHashMap<>();
-  private final AtomicInteger idCounter = new AtomicInteger(hashCode());   // will be reinitialized on handshake
+  private final AtomicInteger idCounter = new AtomicInteger(0);   // will be reset during handshake
 
   private final String clientId;
   private final String host;
@@ -51,23 +52,21 @@ public class Client {
       socket.setKeepAlive(true);
       socket.setOption(StandardSocketOptions.TCP_NODELAY, true);
       socket.connect(new InetSocketAddress(host, port));
-      var conn = new Connection(socket);
-      synchronized (conn.output) {
-        conn.writeMessage(HANDSHAKE, idCounter.incrementAndGet(), clientId, null);
-        logger.info("Client handshake request sent");
-      }
+      connection = new Connection(socket);
       receiverExecutor.execute(() -> {
         try {
-          conn.run();
+          connection.run();
         } catch (Exception e) {
           logger.error("Stopping " + clientId + " due to exception", e);
           stop();
         }
       });
-      this.connection = conn;
-      logger.info("Started the client");
-    } catch (IOException e) {
-      throw new IOExceptionWrapper(e);
+      connection.doHandshake();
+      logger.info("Started the client {}", clientId);
+    } catch (Exception e) {
+      logger.error("Could not start the client " + clientId, e);
+      connection.close();
+      throw (e instanceof RuntimeException ex) ? ex : new RuntimeException(e);
     }
   }
 
@@ -114,8 +113,18 @@ public class Client {
 
   private class Connection extends SocketConnection {
 
+    private final CompletableFuture<?> pendingHandshake = new CompletableFuture<Void>();
+
     private Connection(Socket socket) throws IOException {
       super(socket);
+    }
+
+    private void doHandshake() throws Exception {
+      synchronized (output) {
+        writeMessage(HANDSHAKE, idCounter.incrementAndGet(), clientId, null);
+        logger.info("Client handshake request sent");
+      }
+      pendingHandshake.get(30, TimeUnit.SECONDS);  // wait response from server
     }
 
     private void run() throws IOException {
@@ -134,6 +143,7 @@ public class Client {
             var msg = readMessage(false);
             logger.info("Received handshake response, seq={}", msg.id());
             idCounter.set(msg.id() * 1_000_000);
+            pendingHandshake.complete(null);
           }
           case SUBSCRIBE_ACK -> {
             var msg = readMessage(false);

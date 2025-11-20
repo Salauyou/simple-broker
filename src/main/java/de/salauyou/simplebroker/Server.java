@@ -119,7 +119,7 @@ public class Server {
         }
         case HANDSHAKE -> {
           clientId = readMessage(false).topic() + '/' + remoteAddress;
-          logger.info("Received handshake reques from {}", clientId);
+          logger.info("Received handshake request from {}", clientId);
           writeExecutor.execute(() -> {
             try {
               writeMessage(HANDSHAKE, seq, "", null);
