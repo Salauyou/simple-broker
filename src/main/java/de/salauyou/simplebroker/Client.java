@@ -121,7 +121,7 @@ public class Client {
 
     private void doHandshake() throws Exception {
       synchronized (output) {
-        writeMessage(HANDSHAKE, idCounter.incrementAndGet(), clientId, null);
+        writeMessage(HANDSHAKE, 0, clientId, null);
         logger.info("Client handshake request sent");
       }
       pendingHandshake.get(30, TimeUnit.SECONDS);  // wait response from server
