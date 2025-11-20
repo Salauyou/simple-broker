@@ -144,16 +144,16 @@ public class Server {
           }
           case SUBSCRIBE_REQUEST -> {
             var msg = readMessage(false);
-            logger.info("Received subscription request id={} for topic={} from {}", msg.hexId(), msg.topic(), clientId);
+            logger.info("Received subscription request id={} for topic={} from {}", msg.getId(), msg.topic(), clientId);
             topicSubscriptions
               .computeIfAbsent(msg.topic(), it -> new ConcurrentHashMap<>())
               .putIfAbsent(this, true);
             writeExecutor.execute(() -> {
               try {
                 writeMessage(SUBSCRIBE_ACK, msg.id(), msg.topic(), null);
-                logger.debug("Sent subscription ack id={} for topic={} to {}", msg.hexId(), msg.topic(), clientId);
+                logger.debug("Sent subscription ack id={} for topic={} to {}", msg.getId(), msg.topic(), clientId);
               } catch (Exception e) {
-                logger.error("Could not send subscription ack id=" + msg.hexId(), e);
+                logger.error("Could not send subscription ack id=" + msg.getId(), e);
                 breakWithException(e);
               }
             });
@@ -162,7 +162,7 @@ public class Server {
             var msg = readMessage(true);
             var sync = (mark == SYNC_MESSAGE);
             logger.debug("Received {} id={} for topic={} from {} ({} bytes)",
-              (sync ? "sync message" : "message"), msg.hexId(), msg.topic(), clientId, msg.getBody().length
+              (sync ? "sync message" : "message"), msg.getId(), msg.topic(), clientId, msg.getBody().length
             );
             var clients = topicSubscriptions.getOrDefault(msg.topic(), Collections.emptyMap()).keySet();
             if (clients.isEmpty()) {
@@ -171,9 +171,9 @@ public class Server {
                 writeExecutor.execute(() -> {
                   try {
                     writeMessage(MESSAGE_ACK, msg.id(), msg.topic(), null);
-                    logger.debug("Sent immediate message ack id={} to {}", msg.hexId(), clientId);
+                    logger.debug("Sent immediate message ack id={} to {}", msg.getId(), clientId);
                   } catch (Exception e) {
-                    logger.error("Could not sent message ack id=" + msg.hexId(), e);
+                    logger.error("Could not sent message ack id=" + msg.getId(), e);
                     breakWithException(e);
                   }
                 });
@@ -187,9 +187,9 @@ public class Server {
                 client.writeExecutor.execute(() -> {
                   try {
                     client.writeMessage((sync ? SYNC_MESSAGE : MESSAGE), msg.id(), msg.topic(), msg.body());
-                    logger.debug("Sent {} id={} to {}", (sync ? "sync message" : "message"), msg.hexId(), client.clientId);
+                    logger.debug("Sent {} id={} to {}", (sync ? "sync message" : "message"), msg.getId(), client.clientId);
                   } catch (Exception e) {
-                    logger.error("Could not send message id=" + msg.hexId(), e);
+                    logger.error("Could not send message id=" + msg.getId(), e);
                     client.breakWithException(e);
                   }
                 });
@@ -198,7 +198,7 @@ public class Server {
           }
           case MESSAGE_ACK -> {
             var msg = readMessage(false);
-            logger.debug("Received message ack id={} from {}", msg.hexId(), clientId);
+            logger.debug("Received message ack id={} from {}", msg.getId(), clientId);
             var pendingAck = pendingAcks.get(msg.id());
             if (pendingAck != null) {
               pendingAck.pendingClients.removeIf(it -> it == this);
@@ -207,9 +207,9 @@ public class Server {
                 initiator.writeExecutor.execute(() -> {
                   try {
                     initiator.writeMessage(MESSAGE_ACK, msg.id(), msg.topic(), null);
-                    logger.debug("Sent message ack id={} to {}", msg.hexId(), initiator.clientId);
+                    logger.debug("Sent message ack id={} to {}", msg.getId(), initiator.clientId);
                   } catch (Exception e) {
-                    logger.error("Could not sent message ack id=" + msg.hexId(), e);
+                    logger.error("Could not sent message ack id=" + msg.getId(), e);
                     initiator.breakWithException(e);
                   }
                 });

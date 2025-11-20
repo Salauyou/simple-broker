@@ -112,10 +112,6 @@ abstract class SocketConnection {
     public byte[] getBody() {
       return body;
     }
-
-    String hexId() {
-      return Integer.toHexString(id);
-    }
   }
 
   static class IOExceptionWrapper extends RuntimeException {

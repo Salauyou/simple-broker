@@ -133,7 +133,7 @@ public class Client {
           case HANDSHAKE -> {
             var msg = readMessage(false);
             logger.info("Received handshake response, seq={}", msg.id());
-            idCounter.set(msg.id() << 20);
+            idCounter.set(msg.id() * 1_000_000);
           }
           case SUBSCRIBE_ACK -> {
             var msg = readMessage(false);
@@ -147,7 +147,7 @@ public class Client {
             var msg = readMessage(true);
             var sync = (mark == SYNC_MESSAGE);
             logger.info("Received {} id={} from topic={} ({} bytes)",
-              (sync ? "sync message" : "message"), msg.hexId(), msg.topic(), msg.body().length);
+              (sync ? "sync message" : "message"), msg.getId(), msg.topic(), msg.body().length);
             var consumer = topicConsumers.get(msg.topic());
             if (consumer != null) {
               try {
@@ -160,18 +160,18 @@ public class Client {
               synchronized (connection.output) {
                 writeMessage(MESSAGE_ACK, msg.id(), msg.topic(), null);
               }
-              logger.info("Sent message ack id={}", msg.hexId());
+              logger.info("Sent message ack id={}", msg.getId());
             }
           }
           case MESSAGE_ACK -> {
             var msg = readMessage(false);
-            logger.info("Received message ack id={}", msg.hexId());
+            logger.info("Received message ack id={}", msg.getId());
             var promise = pendingAcks.remove(msg.id());
             if (promise != null) {
               promise.complete(null);
             }
           }
-          default -> throw new IOException("Unexpected mark " + mark);
+          default -> throw new IOException("Unexpected mark 0x" + Integer.toHexString(mark));
         }
       }
     }
@@ -180,7 +180,7 @@ public class Client {
       topicConsumers.put(topic, consumer);
       var id = idCounter.incrementAndGet();
       var ackPromise = pendingAcks.computeIfAbsent(id, it -> new CompletableFuture<>());
-      logger.info("Sending subscription request id={} for topic={}", Integer.toHexString(id), topic);
+      logger.info("Sending subscription request id={} for topic={}", id, topic);
       try {
         synchronized (connection.output) {
           writeMessage(SUBSCRIBE_REQUEST, id, topic, null);
@@ -200,7 +200,7 @@ public class Client {
         ? pendingAcks.computeIfAbsent(id, it -> new CompletableFuture<>())
         : CompletableFuture.completedFuture(null);
       logger.info("Sending {} id={} into topic={} ({} bytes)",
-        (sync ? "sync message" : "message"), Integer.toHexString(id), topic, body.length);
+        (sync ? "sync message" : "message"), id, topic, body.length);
       try {
         synchronized (connection.output) {
           writeMessage((sync ? SYNC_MESSAGE : MESSAGE), id, topic, body);
