@@ -190,6 +190,9 @@ public class Server {
                     logger.debug("Sent {} id={} to {}", (sync ? "sync message" : "message"), msg.getId(), client.clientId);
                   } catch (Exception e) {
                     logger.error("Could not send message id=" + msg.getId(), e);
+                    if (sync) {
+                      applyClientMessageAck(client, msg.id(), msg.topic());
+                    }
                     client.breakWithException(e);
                   }
                 });
@@ -199,24 +202,28 @@ public class Server {
           case MESSAGE_ACK -> {
             var msg = readMessage(false);
             logger.debug("Received message ack id={} from {}", msg.getId(), clientId);
-            var pendingAck = pendingAcks.get(msg.id());
-            if (pendingAck != null) {
-              pendingAck.pendingClients.removeIf(it -> it == this);
-              if (pendingAck.pendingClients.isEmpty() && pendingAcks.remove(msg.id()) != null) {
-                var initiator = pendingAck.initiator;
-                initiator.writeExecutor.execute(() -> {
-                  try {
-                    initiator.writeMessage(MESSAGE_ACK, msg.id(), msg.topic(), null);
-                    logger.debug("Sent message ack id={} to {}", msg.getId(), initiator.clientId);
-                  } catch (Exception e) {
-                    logger.error("Could not sent message ack id=" + msg.getId(), e);
-                    initiator.breakWithException(e);
-                  }
-                });
-              }
-            }
+            applyClientMessageAck(this, msg.id(), msg.topic());
           }
           default -> throw new IllegalStateException("Unexpected mark 0x" + Integer.toHexString(mark));
+        }
+      }
+    }
+
+    private void applyClientMessageAck(ClientConnection client, int id, String topic) {
+      var pendingAck = pendingAcks.get(id);
+      if (pendingAck != null) {
+        pendingAck.pendingClients.removeIf(it -> it == client);
+        if (pendingAck.pendingClients.isEmpty() && pendingAcks.remove(id) != null) {
+          var initiator = pendingAck.initiator;
+          initiator.writeExecutor.execute(() -> {
+            try {
+              initiator.writeMessage(MESSAGE_ACK, id, topic, null);
+              logger.debug("Sent message ack id={} to {}", id, initiator.clientId);
+            } catch (Exception e) {
+              logger.error("Could not sent message ack id=" + id, e);
+              initiator.breakWithException(e);
+            }
+          });
         }
       }
     }
