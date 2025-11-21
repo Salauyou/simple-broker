@@ -96,8 +96,8 @@ public class Client {
 
   /**
    * Sends message into topic. If sync=false, returned promise is already completed.
-   * If sync=true, it will complete after all topic subscribers consume this message
-   * normally or exceptionally
+   * If sync=true, it will complete after all topic subscribers, that are able to receive
+   * this message, consume it normally or exceptionally
    */
   public CompletableFuture<?> send(String topic, byte[] body, boolean sync) {
     return requireConnection().send(topic, body, sync);
